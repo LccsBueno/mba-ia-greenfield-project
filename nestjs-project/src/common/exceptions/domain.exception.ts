@@ -48,3 +48,45 @@ export class TokenReuseDetectedException extends DomainException {
     );
   }
 }
+
+export class VideoNotFoundException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_FOUND', 404, 'Video not found');
+  }
+}
+
+export class ForbiddenVideoAccessException extends DomainException {
+  constructor() {
+    super(
+      'FORBIDDEN_VIDEO_ACCESS',
+      403,
+      'You do not have access to this video',
+    );
+  }
+}
+
+export class VideoNotInDraftException extends DomainException {
+  constructor() {
+    super(
+      'VIDEO_NOT_IN_DRAFT',
+      409,
+      'Video upload is not in a state that can be completed or aborted',
+    );
+  }
+}
+
+export class UploadPartsMismatchException extends DomainException {
+  constructor() {
+    super(
+      'UPLOAD_PARTS_MISMATCH',
+      400,
+      'Uploaded parts do not match the expected multipart upload',
+    );
+  }
+}
+
+export class VideoNotReadyException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_READY', 409, 'Video is not ready for playback');
+  }
+}

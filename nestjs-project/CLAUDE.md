@@ -34,6 +34,10 @@ docker compose exec nestjs-api npm run start:dev
 Services:
 - `nestjs-api` — NestJS API, port `3000`
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `mailpit` — SMTP capture for transactional email, SMTP `1025`, web UI `8025`
+- `minio` — S3-compatible object storage (videos/thumbnails), API `9000`, console `9001`
+- `redis` — BullMQ queue broker, port `6379`
+- `video-worker` — standalone Nest application context that consumes the `video-processing` queue (no HTTP listener); same image as `nestjs-api` (`Dockerfile.dev`, which includes `ffmpeg`/`ffprobe`), entrypoint `npm run worker:dev`
 
 All verification and teardown commands run on the **host machine**:
 
@@ -141,6 +145,29 @@ Whenever possible, prefer storing only the bare address in `.env` and composing 
 ## Build Assets
 
 `tsc` (and therefore `nest build`) only emits compiled `.ts` files to `dist/`. Any non-TypeScript runtime asset — Handlebars templates (`.hbs`), JSON fixtures, static config files, etc. — must be declared in `nest-cli.json` under `compilerOptions.assets` (with `watchAssets: true` for dev). Without that, the file exists in `src/` but is missing in `dist/` and runtime fails only after build.
+
+## Video Module (Phase 03)
+
+Upload, background processing, and streaming/download of videos. Backend-only in this phase — no `next-frontend/` video UI.
+
+**Modules:**
+- `src/videos/` — `VideosModule` (API-side): `VideosController` (HTTP), `VideosService` (upload orchestration, ownership/status guards, streaming/download), `Video` entity, DTOs. Does **not** register the queue processor — only the API process handles HTTP.
+- `src/videos/processing/` — worker-only code: `VideoProcessor` (`@Processor('video-processing')`, extends `WorkerHost`), `ffmpeg.util.ts` (`probeVideo`/`extractThumbnail` via `child_process.execFile` — not `fluent-ffmpeg`, which is archived), `VideoProcessingModule`. Imported only by `WorkerModule`, never by `AppModule`, so the queue consumer never runs inside the API process.
+- `src/storage/` — `StorageModule`/`StorageService`: AWS SDK v3 `S3Client` configured for MinIO (`forcePathStyle: true`). Multipart upload lifecycle (`createMultipartUpload`, `presignUploadPart`, `completeMultipartUpload`, `abortMultipartUpload`), `getObject` with `Range` passthrough, `putObject`. Bucket bootstrap (`ensureBucketExists`) runs on `onModuleInit`.
+- `src/queue/` — `VideoQueueModule`/`VideoQueueService`: BullMQ producer (`enqueueProcessing`), `attempts: 3` + exponential backoff (`delay: 5000`).
+- `src/worker/` — `WorkerModule` + `main.ts`: separate entrypoint (`NestFactory.createApplicationContext`, no HTTP listener) bootstrapping only `VideoProcessingModule` + its own DB/queue connections. Run via `npm run worker:dev` (dev) / `npm run worker:start` (compiled) — the `video-worker` Compose service.
+
+**Upload flow:** `POST /videos/uploads` creates a `DRAFT` video row + presigned S3 multipart upload (100MB parts, 60min-expiry URLs) — the client uploads part bytes directly to MinIO, bypassing the API. `POST /videos/uploads/:id/complete` finalizes the multipart upload, flips status to `PROCESSING`, and enqueues a `video-processing` job. `POST /videos/uploads/:id/abort` aborts the upload and deletes the draft.
+
+**Processing:** the worker downloads the original to a temp file, extracts duration/dimensions via `ffprobe`, generates a thumbnail via `ffmpeg` (1s in, or `duration/2` for videos under 2s), uploads the thumbnail, and sets status `READY`. On failure, BullMQ retries automatically; once attempts are exhausted, status flips to `ERROR` with `processing_error` set.
+
+**Playback:** `GET /videos/:slug/stream` proxies bytes from MinIO with `Range`/`206 Partial Content` support; `GET /videos/:slug/download` serves the full file with `Content-Disposition: attachment`. Both require the video to be `READY` and require the caller to own the video's channel (no public/anonymous video access in this phase).
+
+**Video status lifecycle:** `DRAFT → PROCESSING → READY | ERROR`.
+
+**Env vars:** `S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_FORCE_PATH_STYLE`, `REDIS_HOST`, `REDIS_PORT` — see `.env.example`.
+
+See `docs/decisions/technical-decisions-video-upload-processing.md` and `docs/phases/phase-03-videos/` for the full research/plan behind these choices.
 
 ## Architecture
 
